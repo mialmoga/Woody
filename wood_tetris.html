@@ -470,22 +470,15 @@ if (!isMobile) {
 
 composer.addPass(new OutputPass());
 
-// En mobile compensamos sin SSAO con un ambient ligeramente más bajo
-// y sombras un poco más definidas — el look sigue siendo sólido
-if (isMobile) {
-  ambient.intensity = 0.45;
-  keyLight.intensity = 2.0;
-}
-
 // ===== ILUMINACIÓN =====
-const ambient = new THREE.AmbientLight(0xfff0d8, 0.55);
+const ambient = new THREE.AmbientLight(0xfff0d8, isMobile ? 0.45 : 0.55);
 scene.add(ambient);
 
 const hemi = new THREE.HemisphereLight(0xfff0d8, 0xc8a878, 0.45);
 hemi.position.set(0, 20, 0);
 scene.add(hemi);
 
-const keyLight = new THREE.DirectionalLight(0xfff5e0, 1.8);
+const keyLight = new THREE.DirectionalLight(0xfff5e0, isMobile ? 2.0 : 1.8);
 keyLight.position.set(-8, 18, 14);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(2048, 2048);
@@ -672,34 +665,29 @@ function gridToWorld(col, row) {
   };
 }
 
-// Cada pieza tiene un "sello de textura": uBase, vBase, uSpan
-// Los UVs de cada cubo se calculan según su (col, row) en el tablero —
-// así al rotar, la veta sigue siendo coherente con el mundo, no con la pieza.
-// pieceStamp = { uBase, vBase, uSpan } — compartido por todos los cubos de la pieza
-function makeCube(col, row, pieceStamp) {
+// makeCube ahora solo crea el mesh — los UVs se aplican con refreshPieceUVs
+// después de que la pieza tenga sus bloques posicionados
+function makeCube() {
   const geo = cubeGeo.clone();
-  applyUVs(geo, col, row, pieceStamp);
   const mesh = new THREE.Mesh(geo, pieceMaterial);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
-  // Guardamos el stamp en el mesh para poder recalcular al rotar
-  mesh.userData.pieceStamp = pieceStamp;
   return mesh;
 }
 
-// Aplica UVs a una geometría según posición (col, row) en el tablero y el stamp de la pieza.
-// col/row son las coordenadas del tablero — fijas en el mundo aunque la pieza rote.
-function applyUVs(geo, col, row, stamp) {
+// Aplica UVs según posición local del cubo dentro del bounding box ACTUAL de la pieza.
+// La pieza es un bloque de madera sólido: cuando rota, cada cubo recibe la región
+// del atlas correspondiente a su posición local actual en la pieza rotada.
+// Como todos los cubos comparten el mismo pieceStamp, la continuidad de veta se mantiene.
+function applyUVs(geo, localX, localY, pieceWidth, pieceHeight, stamp) {
   const { uBase, vBase, uSpan } = stamp;
   const uvs = geo.attributes.uv;
 
-  // Cada cubo ocupa 1/COLS del ancho y 1/ROWS del alto del "mundo UV"
-  // Lo escalamos por uSpan para que la pieza use un trozo del atlas
-  const uPerCell = uSpan / COLS;
-  const vPerCell = uSpan / ROWS;
+  const uPerCell = uSpan / pieceWidth;
+  const vPerCell = uSpan / pieceHeight;
 
-  const uMin = uBase + col * uPerCell;
-  const vMin = vBase + (ROWS - 1 - row) * vPerCell;
+  const uMin = uBase + localX * uPerCell;
+  const vMin = vBase + (pieceHeight - 1 - localY) * vPerCell;
   const uMax = uMin + uPerCell;
   const vMax = vMin + vPerCell;
 
@@ -711,6 +699,26 @@ function applyUVs(geo, col, row, stamp) {
     uvs.setXY(base + 3, uMax, vMin);
   }
   uvs.needsUpdate = true;
+}
+
+// Recalcula UVs de toda una pieza basándose en las posiciones actuales de sus bloques.
+// Esto se llama tanto al spawn como al rotar.
+function refreshPieceUVs(piece) {
+  // Calcular bounding box actual de la pieza
+  const cols = piece.blocks.map(b => b.col);
+  const rows = piece.blocks.map(b => b.row);
+  const minCol = Math.min(...cols);
+  const minRow = Math.min(...rows);
+  const maxCol = Math.max(...cols);
+  const maxRow = Math.max(...rows);
+  const pieceWidth = maxCol - minCol + 1;
+  const pieceHeight = maxRow - minRow + 1;
+
+  for (const b of piece.blocks) {
+    const localX = b.col - minCol;
+    const localY = b.row - minRow;
+    applyUVs(b.mesh.geometry, localX, localY, pieceWidth, pieceHeight, piece.pieceStamp);
+  }
 }
 
 // ===== GAME LOGIC =====
@@ -737,12 +745,15 @@ function spawnPiece() {
   for (const [x, y] of shape) {
     const col = x + offsetX;
     const row = y + offsetY;
-    const mesh = makeCube(col, row, pieceStamp);
+    const mesh = makeCube();
     boardGroup.add(mesh);
     const pos = gridToWorld(col, row);
     mesh.position.set(pos.x, pos.y, 0);
     piece.blocks.push({ col, row, mesh });
   }
+
+  // Aplicar UVs ahora que tenemos bounding box completo
+  refreshPieceUVs(piece);
 
   if (collides(piece, 0, 0)) {
     for (const b of piece.blocks) {
@@ -804,14 +815,9 @@ function rotate() {
         currentPiece.blocks[i].row = candidate[i].row;
         const pos = gridToWorld(candidate[i].col, candidate[i].row);
         currentPiece.blocks[i].mesh.position.set(pos.x, pos.y, 0);
-        // Recalcular UVs según nueva posición mundial → veta coherente tras rotar
-        applyUVs(
-          currentPiece.blocks[i].mesh.geometry,
-          candidate[i].col,
-          candidate[i].row,
-          currentPiece.pieceStamp
-        );
       }
+      // Recalcular UVs según nuevo bounding box → la pieza rota como un bloque sólido
+      refreshPieceUVs(currentPiece);
       // Slip suave en rotación
       playSound('slip', { gain: 0.22, pitch: 1.05 + Math.random() * 0.08 });
       return;
