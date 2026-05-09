@@ -1,4 +1,4 @@
-# 🪵 Wood Tetris
+# 🪵 Woody
 
 > *"Too serious to be a toy. Too fun not to play with."*
 
