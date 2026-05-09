@@ -37,7 +37,7 @@ No accounts. No ads. No leaderboard. No server. No notifications asking you to c
 ## File structure
 
 ```
-wood_tetris.html      — the whole game (~40KB)
+index.html      — the whole game (~40KB)
 img/
   wood1.png           — board texture (light oak), albedo
   wood1_n.png         — normal map
