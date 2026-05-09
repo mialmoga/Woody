@@ -4,7 +4,7 @@
 
 A browser-based Tetris built to look exactly like those zen wood-block ads you see while doomscrolling at 3am — except this one actually exists, runs entirely from local files, and nobody is collecting your data.
 
-![Wood Tetris](img/wood2.png)
+![Wood Tetris](img/screen.png)
 
 ---
 
