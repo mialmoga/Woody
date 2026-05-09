@@ -452,16 +452,30 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 app.appendChild(renderer.domElement);
 
 // ===== POST-PROCESSING (SSAO) =====
+// En mobile el SSAO causa problemas de color al entrar a fullscreen.
+// Lo activamos solo en desktop donde es más estable.
+const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent) || ('ontouchstart' in window);
+
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 
-const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
-ssaoPass.kernelRadius = 0.6;
-ssaoPass.minDistance = 0.002;
-ssaoPass.maxDistance = 0.08;
-composer.addPass(ssaoPass);
+let ssaoPass = null;
+if (!isMobile) {
+  ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+  ssaoPass.kernelRadius = 0.6;
+  ssaoPass.minDistance = 0.002;
+  ssaoPass.maxDistance = 0.08;
+  composer.addPass(ssaoPass);
+}
 
 composer.addPass(new OutputPass());
+
+// En mobile compensamos sin SSAO con un ambient ligeramente más bajo
+// y sombras un poco más definidas — el look sigue siendo sólido
+if (isMobile) {
+  ambient.intensity = 0.45;
+  keyLight.intensity = 2.0;
+}
 
 // ===== ILUMINACIÓN =====
 const ambient = new THREE.AmbientLight(0xfff0d8, 0.55);
@@ -658,62 +672,45 @@ function gridToWorld(col, row) {
   };
 }
 
-// Crea un cubo con UVs específicas por cara — permite continuidad de veta entre cubos
-// de una misma pieza ("cortados del mismo tronco").
-// localX/localY = posición del cubo dentro de la pieza (en unidades de cubo)
-// pieceWidth/pieceHeight = dimensiones de la pieza (en cubos)
-// uBase/vBase = offset random de la pieza dentro del atlas (0..0.5)
-// uSpan = tamaño del sample por pieza (típicamente 0.4-0.5)
-function makeCube(localX, localY, pieceWidth, pieceHeight, uBase, vBase, uSpan) {
+// Cada pieza tiene un "sello de textura": uBase, vBase, uSpan
+// Los UVs de cada cubo se calculan según su (col, row) en el tablero —
+// así al rotar, la veta sigue siendo coherente con el mundo, no con la pieza.
+// pieceStamp = { uBase, vBase, uSpan } — compartido por todos los cubos de la pieza
+function makeCube(col, row, pieceStamp) {
   const geo = cubeGeo.clone();
-  const uvs = geo.attributes.uv;
-
-  // BoxGeometry tiene 6 caras × 4 vértices = 24 vértices con UVs.
-  // El orden de las caras en r163 es: +X, -X, +Y, -Y, +Z, -Z
-  // UVs originales por cara: (0,1), (1,1), (0,0), (1,0)
-  //
-  // Estrategia: solo las caras frontal (+Z) y trasera (-Z) y las laterales (+X, -X, +Y, -Y)
-  // que son visibles desde la cámara comparten coordenadas continuas.
-  // Como la cámara mira casi de frente, lo que importa es la cara +Z.
-  //
-  // Para CADA cara, mapeamos las UVs a la región (uBase + localX/pieceWidth * uSpan,
-  // vBase + (pieceHeight-1-localY)/pieceHeight * vSpan) hasta el siguiente cubo.
-
-  const uPerCube = uSpan / pieceWidth;
-  const vPerCube = uSpan / pieceHeight;
-  // Coordenadas globales dentro del atlas para este cubo concreto
-  const uMin = uBase + localX * uPerCube;
-  const vMin = vBase + (pieceHeight - 1 - localY) * vPerCube;
-  const uMax = uMin + uPerCube;
-  const vMax = vMin + vPerCube;
-
-  // Para cada cara, reescribir las 4 UVs.
-  // Las caras frontal/trasera (+Z, -Z, índices 4 y 5) usan el mapeo directo localX/localY.
-  // Las laterales (+X, -X, +Y, -Y) las mapeamos también dentro del rango pero "rotadas"
-  // para que la veta vertical de la madera quede vertical en todas las caras.
-  //
-  // Simplificación: a todas las caras les damos el mismo rango uMin..uMax / vMin..vMax.
-  // El BoxGeometry de three.js usa este orden de UV por cara (en cada uno de los 4 vertices):
-  //   v0: (0, 1)  v1: (1, 1)  v2: (0, 0)  v3: (1, 0)
-  // Eso lo remapeamos a (uMin, vMax), (uMax, vMax), (uMin, vMin), (uMax, vMin)
-
-  for (let face = 0; face < 6; face++) {
-    const base = face * 4;
-    // Vertex 0: (0,1) → (uMin, vMax)
-    uvs.setXY(base + 0, uMin, vMax);
-    // Vertex 1: (1,1) → (uMax, vMax)
-    uvs.setXY(base + 1, uMax, vMax);
-    // Vertex 2: (0,0) → (uMin, vMin)
-    uvs.setXY(base + 2, uMin, vMin);
-    // Vertex 3: (1,0) → (uMax, vMin)
-    uvs.setXY(base + 3, uMax, vMin);
-  }
-  uvs.needsUpdate = true;
-
+  applyUVs(geo, col, row, pieceStamp);
   const mesh = new THREE.Mesh(geo, pieceMaterial);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
+  // Guardamos el stamp en el mesh para poder recalcular al rotar
+  mesh.userData.pieceStamp = pieceStamp;
   return mesh;
+}
+
+// Aplica UVs a una geometría según posición (col, row) en el tablero y el stamp de la pieza.
+// col/row son las coordenadas del tablero — fijas en el mundo aunque la pieza rote.
+function applyUVs(geo, col, row, stamp) {
+  const { uBase, vBase, uSpan } = stamp;
+  const uvs = geo.attributes.uv;
+
+  // Cada cubo ocupa 1/COLS del ancho y 1/ROWS del alto del "mundo UV"
+  // Lo escalamos por uSpan para que la pieza use un trozo del atlas
+  const uPerCell = uSpan / COLS;
+  const vPerCell = uSpan / ROWS;
+
+  const uMin = uBase + col * uPerCell;
+  const vMin = vBase + (ROWS - 1 - row) * vPerCell;
+  const uMax = uMin + uPerCell;
+  const vMax = vMin + vPerCell;
+
+  for (let face = 0; face < 6; face++) {
+    const base = face * 4;
+    uvs.setXY(base + 0, uMin, vMax);
+    uvs.setXY(base + 1, uMax, vMax);
+    uvs.setXY(base + 2, uMin, vMin);
+    uvs.setXY(base + 3, uMax, vMin);
+  }
+  uvs.needsUpdate = true;
 }
 
 // ===== GAME LOGIC =====
@@ -725,29 +722,22 @@ function spawnPiece() {
   const shape = SHAPES[shapeKey].map(([x, y]) => [x, y]);
   const minX = Math.min(...shape.map(s => s[0]));
   const maxX = Math.max(...shape.map(s => s[0]));
-  const minY = Math.min(...shape.map(s => s[1]));
-  const maxY = Math.max(...shape.map(s => s[1]));
-  const pieceWidth = maxX - minX + 1;
-  const pieceHeight = maxY - minY + 1;
-  const offsetX = Math.floor((COLS - pieceWidth) / 2) - minX;
+  const offsetX = Math.floor((COLS - (maxX - minX + 1)) / 2) - minX;
   const offsetY = -1;
 
-  // === CONTINUIDAD DE VETA ===
-  // Sample aleatorio de la textura para esta pieza completa.
-  // uSpan = tamaño del trozo de textura asignado a la pieza (40% del atlas).
-  // Cuanto mayor, más grano grueso por cubo; cuanto menor, más detalle pero menos variedad.
-  const uSpan = 0.4;
-  const uBase = Math.random() * (1 - uSpan);
-  const vBase = Math.random() * (1 - uSpan);
+  // Stamp compartido por toda la pieza — define qué trozo del atlas usa
+  const uSpan = 0.55;
+  const pieceStamp = {
+    uBase: Math.random() * (1 - uSpan),
+    vBase: Math.random() * (1 - uSpan),
+    uSpan,
+  };
 
-  const piece = { shape, blocks: [], shapeKey };
+  const piece = { shape, blocks: [], shapeKey, pieceStamp };
   for (const [x, y] of shape) {
     const col = x + offsetX;
     const row = y + offsetY;
-    // Coordenadas locales dentro de la pieza (0..pieceWidth-1, 0..pieceHeight-1)
-    const localX = x - minX;
-    const localY = y - minY;
-    const mesh = makeCube(localX, localY, pieceWidth, pieceHeight, uBase, vBase, uSpan);
+    const mesh = makeCube(col, row, pieceStamp);
     boardGroup.add(mesh);
     const pos = gridToWorld(col, row);
     mesh.position.set(pos.x, pos.y, 0);
@@ -755,8 +745,6 @@ function spawnPiece() {
   }
 
   if (collides(piece, 0, 0)) {
-    // FIX BUG 2: limpiar los meshes recién creados antes de game-over,
-    // si no quedan huérfanos en boardGroup y aparecen como fantasma.
     for (const b of piece.blocks) {
       boardGroup.remove(b.mesh);
       if (b.mesh.geometry) b.mesh.geometry.dispose();
@@ -816,7 +804,16 @@ function rotate() {
         currentPiece.blocks[i].row = candidate[i].row;
         const pos = gridToWorld(candidate[i].col, candidate[i].row);
         currentPiece.blocks[i].mesh.position.set(pos.x, pos.y, 0);
+        // Recalcular UVs según nueva posición mundial → veta coherente tras rotar
+        applyUVs(
+          currentPiece.blocks[i].mesh.geometry,
+          candidate[i].col,
+          candidate[i].row,
+          currentPiece.pieceStamp
+        );
       }
+      // Slip suave en rotación
+      playSound('slip', { gain: 0.22, pitch: 1.05 + Math.random() * 0.08 });
       return;
     }
   }
@@ -1199,8 +1196,6 @@ pauseBtn.addEventListener('click', togglePause);
 
 // ===== RESIZE & CAMERA =====
 function resize() {
-  // En fullscreen, window.innerWidth/Height puede no reflejar el tamaño real todavía.
-  // Usamos el canvas del renderer como fuente de verdad después de un frame.
   const w = window.innerWidth;
   const h = window.innerHeight;
 
@@ -1220,32 +1215,20 @@ function resize() {
 
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(w, h);
-
-  // Recrear el composer completo al cambiar tamaño — evita que el SSAO
-  // quede con kernel incorrecto y lave los colores
-  composer.passes.length = 0;
   composer.setSize(w, h);
-  composer.addPass(new RenderPass(scene, camera));
-  const newSsao = new SSAOPass(scene, camera, w, h);
-  newSsao.kernelRadius = 0.6;
-  newSsao.minDistance = 0.002;
-  newSsao.maxDistance = 0.08;
-  composer.addPass(newSsao);
-  composer.addPass(new OutputPass());
-
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
 }
 window.addEventListener('resize', resize);
 
-// fullscreenchange: esperar 200ms para que el navegador termine la transición
-// y las dimensiones sean las definitivas
-function onFullscreenChange() {
-  setTimeout(resize, 50);
-  setTimeout(resize, 200); // segunda pasada por si el primer timeout fue temprano
-}
-document.addEventListener('fullscreenchange', onFullscreenChange);
-document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+document.addEventListener('fullscreenchange', () => {
+  setTimeout(resize, 100);
+  setTimeout(resize, 300);
+});
+document.addEventListener('webkitfullscreenchange', () => {
+  setTimeout(resize, 100);
+  setTimeout(resize, 300);
+});
 
 // ===== LOOP =====
 let lastT = performance.now();
