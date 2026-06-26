@@ -335,15 +335,29 @@
       <button class="grove-btn" id="groveBtn">Plant another →</button>
     </div>
   </div>
-
 <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.163.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.163.0/examples/jsm/"
+    "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
   }
 }
 </script>
+<!-- Three.js importmap -
+
+    <script type="importmap">
+    {
+      "imports": {
+        "three":          "/lib/three/build/three.module.js",
+        "three/addons/":  "/lib/three/examples/jsm/",
+        "three/webgpu":   "/lib/three/build/three.webgpu.js",
+        "three/tsl":      "/lib/three/build/three.tsl.js"
+      }
+    }
+    </script>
+
+— ajustar ruta según tu servidor -->
+
 
 <script type="module">
 import * as THREE from 'three';
